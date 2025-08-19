@@ -1,6 +1,7 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
 #include <iostream>
+#include <sstream>
 #include <QLabel>
 #include <QImage>
 #include <QPixmap>
@@ -17,6 +18,9 @@ cv::Mat frame;
 QMutex serverOnFlag_mutex;
 bool serverOnFlag = false;
 
+QMutex clientOnFlag_mutex;
+bool clientOnFlag = false;
+
 QMutex newDataFlag_mutex;
 bool newDataFlg = false;
 
@@ -25,8 +29,12 @@ MainWindow::MainWindow(QWidget *parent)
     , ui(new Ui::MainWindow)
 {
     ui->setupUi(this);
-    connect(ui->stream_pb,&QPushButton::clicked, this,&MainWindow::streamCtrlFunction);
-    connect(ui->server_pb,&QPushButton::clicked,this,&MainWindow::serverCtrlFunction);
+    connect(ui->stream_pb, &QPushButton::clicked, this, &MainWindow::streamCtrlFunction);
+    connect(ui->server_pb, &QPushButton::clicked, this, &MainWindow::serverCtrlFunction);
+    connect(ui->control_pb,&QPushButton::clicked, this, &MainWindow::ctrlFunction);
+    connect(ui->client_pb,&QPushButton::clicked, this, &MainWindow::clientCtrlFunction);
+    connect(ui->target_address_le, &QLineEdit::textChanged, this, &MainWindow::targetAddressChange);
+    connect(ui->target_port_le, &QLineEdit::textChanged, this, &MainWindow::targetPortChange);
     connect(ui->mode_cb, SIGNAL(currentIndexChanged(int)), this, SLOT(modeChangeHandler(int)));
     m_cap.open(0);
 
@@ -52,6 +60,15 @@ MainWindow::MainWindow(QWidget *parent)
 
     ui->address_lbl->setText(QString::fromStdString(getNetworkAddress()));
 
+    m_clientThread = new QThread(this);
+    m_client = new TcpClient();
+    m_client->moveToThread(m_clientThread);
+
+    connect(this,SIGNAL(startClient()),m_client,SLOT(runClient()));
+    connect(m_client,SIGNAL(clientClosed()),this,SLOT(handleClientStop()));
+
+    ui->target_address_le->setText("127.0.0.1");
+    ui->target_port_le->setText("8080");
 }
 
 MainWindow::~MainWindow()
@@ -79,51 +96,15 @@ void MainWindow::handleServerStop()
 
 }
 
-std::string MainWindow::getNetworkAddress()
+void MainWindow::handleClientStop()
 {
-    struct ifaddrs *interfaces = nullptr;
-    struct ifaddrs *ifa = nullptr;
-    std::string res = "";
-
-    if (getifaddrs(&interfaces) == -1) {
-        std::cerr << "Could not retrieve network adapters." << std::endl;
-        return std::string("");
-    }
-
-    for (ifa = interfaces; ifa != nullptr; ifa = ifa->ifa_next)
-    {
-        std::string tmp = "";
-
-        if (ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_INET)
-        {
-            // Check for IPv4 addresses
-            char ipAddress[INET_ADDRSTRLEN];
-            void* addr = &((struct sockaddr_in*)ifa->ifa_addr)->sin_addr;
-            inet_ntop(AF_INET, addr, ipAddress, INET_ADDRSTRLEN);
-
-            std::string ip = std::string(ipAddress);
-            std::string interface = std::string(ifa->ifa_name);
-
-            // Exclude loopback address (127.0.0.1) if desired
-            if (std::string(ipAddress) != "127.0.0.1") {
-
-                tmp += "Interface: ";
-                tmp += interface;
-                tmp += ", IP Address: ";
-                tmp += ip;
-
-            }
-            res += tmp;
-            res += "\n\r";
-
-        }
-
-    }
-    freeifaddrs(interfaces);
-
-    return res;
+    std::cout << "CLIENT STOPPED" << std::endl;
+    ui->client_pb->setText("CONNECT");
+    m_clientThread->exit();
 
 }
+
+
 
 void MainWindow::modeChangeHandler(int index)
 {
@@ -144,6 +125,41 @@ void MainWindow::modeChangeHandler(int index)
         serverOnFlag_mutex.unlock();
 
     }
+
+}
+
+void MainWindow::targetAddressChange()
+{
+    std::string tmp = ui->target_address_le->text().toStdString();
+    bool flg = validateAddressFormat(tmp);
+    if(flg)
+    {
+        //turn text green
+        ui->target_address_le->setStyleSheet("QLineEdit { color: green; }");
+        m_client->setNetworkAddress(tmp);
+    }
+    else
+    {
+        //turn text red
+        ui->target_address_le->setStyleSheet("QLineEdit { color: red; }");
+    }
+}
+
+void MainWindow::targetPortChange()
+{
+    std::string tmp = ui->target_port_le->text().toStdString();
+    if(numeric(tmp))
+    {
+        //turn text green
+        ui->target_port_le->setStyleSheet("QLineEdit { color: green; }");
+        m_client->setPort(static_cast<unsigned int>(std::stoi(tmp)));
+    }
+    else
+    {
+        //turn text red
+        ui->target_port_le->setStyleSheet("QLineEdit { color: red; }");
+    }
+
 
 }
 
@@ -195,6 +211,103 @@ void MainWindow::serverCtrlFunction()
     else
         std::cout << "SERVER CONTROL DISABED!" << std::endl;
 
+
+}
+
+void MainWindow::ctrlFunction()
+{
+
+}
+
+void MainWindow::clientCtrlFunction()
+{
+    clientOnFlag_mutex.lock();
+    if(clientOnFlag)
+    {
+        clientOnFlag = false;
+    }
+    else
+    {
+        std::cout << "CLIENT START" << std::endl;
+        ui->client_pb->setText("DISCONNECT");
+        m_clientThread->start();
+        emit startClient();
+        clientOnFlag = true;
+    }
+    clientOnFlag_mutex.unlock();
+
+
+}
+
+std::string MainWindow::getNetworkAddress()
+{
+    struct ifaddrs *interfaces = nullptr;
+    struct ifaddrs *ifa = nullptr;
+    std::string res = "";
+
+    if (getifaddrs(&interfaces) == -1) {
+        std::cerr << "Could not retrieve network adapters." << std::endl;
+        return std::string("");
+    }
+
+    for (ifa = interfaces; ifa != nullptr; ifa = ifa->ifa_next)
+    {
+        std::string tmp = "";
+
+        if (ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_INET)
+        {
+            // Check for IPv4 addresses
+            char ipAddress[INET_ADDRSTRLEN];
+            void* addr = &((struct sockaddr_in*)ifa->ifa_addr)->sin_addr;
+            inet_ntop(AF_INET, addr, ipAddress, INET_ADDRSTRLEN);
+
+            std::string ip = std::string(ipAddress);
+            std::string interface = std::string(ifa->ifa_name);
+
+            // Exclude loopback address (127.0.0.1) if desired
+            if (std::string(ipAddress) != "127.0.0.1") {
+
+                tmp += "Interface: ";
+                tmp += interface;
+                tmp += ", IP Address: ";
+                tmp += ip;
+
+            }
+            res += tmp;
+            res += "\n\r";
+
+        }
+
+    }
+    freeifaddrs(interfaces);
+
+    return res;
+
+}
+
+bool MainWindow::validateAddressFormat(std::string s)
+{
+    std::string::difference_type n = std::count(s.begin(), s.end(), '.');
+    unsigned int count = static_cast<unsigned int>(n);
+
+    if(count != 3)
+        return false;
+
+    std::vector<std::string> tokens = splitString(s,'.');
+
+    if(tokens.size() != 4)
+        return false;
+
+    for(std::string &tmp : tokens)
+    {
+        if(!numeric(tmp))
+            return false;
+        int x = std::stoi(tmp);
+        if((x < 0) || (x > 255))
+            return false;
+    }
+
+    return true;
 
 }
 
@@ -257,4 +370,32 @@ void MainWindow::printMatRow(const cv::Mat &src, size_t row)
     std::cout << std::endl;
 
 
+}
+
+bool MainWindow::numeric(std::string str)
+{
+    bool test = true;
+
+    for(char a : str)
+    {
+        if(std::isdigit(a))
+            continue;
+        else
+        {
+            test = false;
+            break;
+        }
+    }
+    return test;
+}
+
+std::vector<std::string> MainWindow::splitString(const std::string &str, char delimiter)
+{
+    std::vector<std::string> tokens;
+    std::istringstream iss(str);
+    std::string token;
+    while (std::getline(iss, token, delimiter)) {
+        tokens.push_back(token);
+    }
+    return tokens;
 }

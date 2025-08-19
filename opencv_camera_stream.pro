@@ -11,10 +11,12 @@ CONFIG += c++17
 SOURCES += \
     main.cpp \
     mainwindow.cpp \
+    tcpclient.cpp \
     tcpserver.cpp
 
 HEADERS += \
     mainwindow.h \
+    tcpclient.h \
     tcpserver.h
 INCLUDEPATH += /usr/include/opencv4
 

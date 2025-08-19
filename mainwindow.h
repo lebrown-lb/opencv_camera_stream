@@ -2,6 +2,10 @@
 #define MAINWINDOW_H
 
 #include "tcpserver.h"
+#include "tcpclient.h"
+
+#include <string>
+#include <vector>
 
 #include <QMainWindow>
 #include <QThread>
@@ -26,18 +30,29 @@ public:
 public slots:
     void updateStream();
     void handleServerStop();
+    void handleClientStop();
     void modeChangeHandler(int index);
 
 signals:
     void startServer();
+    void startClient();
+
+private slots:
+    void targetAddressChange();
+    void targetPortChange();
+    void streamCtrlFunction();
+    void serverCtrlFunction();
+    void ctrlFunction();
+    void clientCtrlFunction();
 
 private:
     std::string getNetworkAddress();
-    void streamCtrlFunction();
-    void serverCtrlFunction();
+    bool validateAddressFormat(std::string s);
     void frameCapture();
     QImage matToQImage(const cv::Mat& src);
     void printMatRow(const cv::Mat& src,size_t row);
+    bool numeric(std::string str);
+    std::vector<std::string> splitString(const std::string& str, char delimiter);
     Ui::MainWindow *ui;
     cv::VideoCapture m_cap;
     bool m_streamFlg = false;
@@ -46,6 +61,8 @@ private:
     uint8_t m_mode;
     QThread * m_serverThread = NULL;
     TcpServer * m_server = NULL;
+    QThread * m_clientThread = NULL;
+    TcpClient * m_client = NULL;
 
 
 };

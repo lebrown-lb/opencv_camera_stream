@@ -120,17 +120,23 @@ void MainWindow::handleServerStop()
     serverOnFlag = false;
     serverOnFlag_mutex.unlock();
 
+    if(m_exitFlag)
+        this->close();
+
 }
 
 void MainWindow::handleClientStop()
 {
     std::cout << "CLIENT STOPPED" << std::endl;
     ui->client_pb->setText("CONNECT");
-    m_clientThread->exit();
+    //m_clientThread->exit();
 
     clientOnFlag_mutex.lock();
     clientOnFlag = false;
     clientOnFlag_mutex.unlock();
+
+    if(m_exitFlag)
+        this->close();
 
 }
 
@@ -277,6 +283,40 @@ void MainWindow::clientCtrlFunction()
     }
     clientOnFlag_mutex.unlock();
 
+
+}
+
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    std::cout << "CLOSE EVENT" << std::endl;
+
+    bool serverThreadFlag = false;
+    bool clientThreadFlag = false;
+
+    serverOnFlag_mutex.lock();
+    if(serverOnFlag)
+    {
+        serverOnFlag = false;
+        serverThreadFlag = true;
+    }
+    serverOnFlag_mutex.unlock();
+
+    clientOnFlag_mutex.lock();
+    if(clientOnFlag)
+    {
+        clientOnFlag = false;
+        clientThreadFlag = true;
+    }
+    clientOnFlag_mutex.unlock();
+
+
+    if(serverThreadFlag || clientThreadFlag)
+    {
+        m_exitFlag = true;
+        event->ignore();
+    }
+    else
+        event->accept(); // Allow the close event to proceed
 
 }
 

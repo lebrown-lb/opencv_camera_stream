@@ -10,6 +10,7 @@
 #include <QMainWindow>
 #include <QThread>
 #include <QTimer>
+#include <QCloseEvent>
 #include <opencv2/opencv.hpp>
 #include <opencv2/videoio.hpp>
 
@@ -47,6 +48,9 @@ private slots:
     void ctrlFunction();
     void clientCtrlFunction();
 
+protected:
+    void closeEvent(QCloseEvent *event) override;
+
 private:
     std::string getNetworkAddress();
     bool validateAddressFormat(std::string s);
@@ -58,6 +62,7 @@ private:
     Ui::MainWindow *ui;
     cv::VideoCapture m_cap;
     bool m_streamFlg = false;
+    bool m_exitFlag = false;
     QTimer * m_timer = NULL;
     unsigned int m_prd = 1000/30;
     uint8_t m_mode;

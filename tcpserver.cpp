@@ -71,7 +71,7 @@ void TcpServer::runServer()
         FD_ZERO(&read_fds);
         FD_SET(server_fd, &read_fds);
 
-        timeout.tv_sec = 5; // 5-second timeout
+        timeout.tv_sec = 1; // 5-second timeout
         timeout.tv_usec = 0;
 
         int ret = select(server_fd + 1, &read_fds, NULL, NULL, &timeout);
@@ -194,6 +194,8 @@ void TcpServer::runServer()
                         ssize_t valread = read(new_socket, buffer, 1024);
                         buffer[valread] = '\0';
                         rsp = std::string(buffer);
+                        if(rsp != "" && rsp != "ACK!")
+                            std::cout << "rsp:" << rsp << std::endl;
 
                         if(rsp == "ACK!")
                         {
@@ -212,7 +214,6 @@ void TcpServer::runServer()
                         else if(rsp == "PAUSE")
                         {
                             clientStreamFlag = false;
-                            std::cout << "PAUSE" << std::endl;
                             buffer[0] = '\0';
                             rsp = "";
                             break;
@@ -220,7 +221,6 @@ void TcpServer::runServer()
                         else if(rsp == "PLAY")
                         {
                             clientStreamFlag = true;
-                            std::cout << "PLAY" << std::endl;
                             buffer[0] = '\0';
                             rsp = "";
                             break;

@@ -110,10 +110,12 @@ void TcpClient::runClient()
             frame_mutex.unlock();
             emit updateFrame();
 
+            clientOnFlag_mutex.lock();
             clientCtrlFlag_mutex.lock();
-            if(!clientCtrlFlag)
+            if(!clientCtrlFlag && clientOnFlag)
                 send(sock, ack.c_str(), ack.size(), 0);
             clientCtrlFlag_mutex.unlock();
+            clientOnFlag_mutex.unlock();
         }
 
         clientCtrlFlag_mutex.lock();

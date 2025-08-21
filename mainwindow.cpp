@@ -24,6 +24,12 @@ bool clientOnFlag = false;
 QMutex newDataFlag_mutex;
 bool newDataFlg = false;
 
+QMutex clientCtrlFlag_mutex;
+bool clientCtrlFlag = false;
+
+#define FORMAT_BGR  0xFF
+#define FORMAT_RGB  0x11
+
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
@@ -66,6 +72,9 @@ MainWindow::MainWindow(QWidget *parent)
 
     connect(this,SIGNAL(startClient()),m_client,SLOT(runClient()));
     connect(m_client,SIGNAL(clientClosed()),this,SLOT(handleClientStop()));
+    connect(m_client, SIGNAL(updateFrame()),this,SLOT(displayFrame()));
+    connect(m_client, SIGNAL(ctrlMessageSent(bool)),this,SLOT(ctrlMessageSentHandler(bool)));
+
 
     ui->target_address_le->setText("127.0.0.1");
     ui->target_port_le->setText("8080");
@@ -76,6 +85,7 @@ MainWindow::~MainWindow()
     delete ui;
     if(m_cap.isOpened())
         m_cap.release();
+    m_client->freeData();
 }
 
 void MainWindow::updateStream()
@@ -88,11 +98,27 @@ void MainWindow::updateStream()
 
 }
 
+void MainWindow::displayFrame()
+{
+    frame_mutex.lock();
+    QImage image = matToQImage(frame, FORMAT_RGB);
+    frame_mutex.unlock();
+
+    QPixmap myPixmap = QPixmap::fromImage(image);
+    ui->display->setPixmap(myPixmap);
+
+
+}
+
 void MainWindow::handleServerStop()
 {
     std::cout << "SERVER STOPPED" << std::endl;
     ui->server_pb->setText("OPEN");
     m_serverThread->exit();
+
+    serverOnFlag_mutex.lock();
+    serverOnFlag = false;
+    serverOnFlag_mutex.unlock();
 
 }
 
@@ -101,6 +127,19 @@ void MainWindow::handleClientStop()
     std::cout << "CLIENT STOPPED" << std::endl;
     ui->client_pb->setText("CONNECT");
     m_clientThread->exit();
+
+    clientOnFlag_mutex.lock();
+    clientOnFlag = false;
+    clientOnFlag_mutex.unlock();
+
+}
+
+void MainWindow::ctrlMessageSentHandler(bool x)
+{
+    if(x)
+        ui->control_pb->setText("PAUSE");
+    else
+        ui->control_pb->setText("PLAY");
 
 }
 
@@ -123,7 +162,6 @@ void MainWindow::modeChangeHandler(int index)
         if(serverOnFlag)
             serverOnFlag = false;
         serverOnFlag_mutex.unlock();
-
     }
 
 }
@@ -216,6 +254,9 @@ void MainWindow::serverCtrlFunction()
 
 void MainWindow::ctrlFunction()
 {
+    clientCtrlFlag_mutex.lock();
+    clientCtrlFlag = true;
+    clientCtrlFlag_mutex.unlock();
 
 }
 
@@ -315,8 +356,6 @@ void MainWindow::frameCapture()
 {
     frame_mutex.lock();
     m_cap >> frame;
-    frame_mutex.unlock();
-
 
     if (!frame.empty()) {
 
@@ -329,21 +368,23 @@ void MainWindow::frameCapture()
         }
         serverOnFlag_mutex.unlock();
 
-        QImage image = matToQImage(frame);
+        QImage image = matToQImage(frame,FORMAT_BGR);
         QPixmap myPixmap = QPixmap::fromImage(image);
         ui->display->setPixmap(myPixmap);
     }
+    frame_mutex.unlock();
 
 
 }
 
-QImage MainWindow::matToQImage(const cv::Mat &src)
+QImage MainWindow::matToQImage(const cv::Mat &src, uint8_t fmt)
 {
     // Example for BGR to RGB conversion (common for OpenCV)
     //td::cout << "src.channels() = " << src.channels() <<" src.step = "<< src.step << " src.cols = " << src.cols << " src.rows = " << src.rows << std::endl;
     if (src.channels() == 3) {
         //printMatRow(src,0);
-        cv::cvtColor(src, src, cv::COLOR_BGR2RGB);
+        if(fmt == FORMAT_BGR)
+            cv::cvtColor(src, src, cv::COLOR_BGR2RGB);
         return QImage((const unsigned char*)(src.data), src.cols, src.rows, src.step, QImage::Format_RGB888);
     } else if (src.channels() == 1) {
         return QImage((const unsigned char*)(src.data), src.cols, src.rows, src.step, QImage::Format_Grayscale8);

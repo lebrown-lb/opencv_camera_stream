@@ -158,7 +158,7 @@
            <item>
             <widget class="QPushButton" name="control_pb">
              <property name="text">
-              <string>START</string>
+              <string>PAUSE</string>
              </property>
             </widget>
            </item>

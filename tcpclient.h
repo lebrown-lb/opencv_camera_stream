@@ -19,6 +19,11 @@ public:
     {
         m_ipAddress = str;
     }
+    void freeData()
+    {
+        if(m_data != NULL)
+            delete[] m_data;
+    }
 
 
 public slots:
@@ -26,10 +31,13 @@ public slots:
 
 signals:
     void clientClosed();
+    void updateFrame();
+    void ctrlMessageSent(bool x);
 
 private:
     std::string m_ipAddress;
     unsigned int m_port;
+    unsigned char * m_data = NULL;
 };
 
 #endif // TCPCLIENT_H

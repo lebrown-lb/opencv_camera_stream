@@ -29,8 +29,10 @@ public:
 
 public slots:
     void updateStream();
+    void displayFrame();
     void handleServerStop();
     void handleClientStop();
+    void ctrlMessageSentHandler(bool x);
     void modeChangeHandler(int index);
 
 signals:
@@ -49,7 +51,7 @@ private:
     std::string getNetworkAddress();
     bool validateAddressFormat(std::string s);
     void frameCapture();
-    QImage matToQImage(const cv::Mat& src);
+    QImage matToQImage(const cv::Mat& src,uint8_t fmt);
     void printMatRow(const cv::Mat& src,size_t row);
     bool numeric(std::string str);
     std::vector<std::string> splitString(const std::string& str, char delimiter);

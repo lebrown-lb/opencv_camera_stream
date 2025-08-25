@@ -58,9 +58,33 @@ void TcpClient::runClient()
 
     int rows, cols, type;
     size_t step;
+    ssize_t valread;
 
-    ssize_t valread = read(sock, buffer, 1024);
-    std::cout << "Received: " << buffer << std::endl;
+    std::string ack = "ACK!";
+    std::string fin = "FIN!";
+    std::string pause = "PAUSE";
+    std::string play = "PLAY";
+
+    while(true)
+    {
+        clientOnFlag_mutex.lock();
+        if(!clientOnFlag)
+        {
+            clientOnFlag_mutex.unlock();
+            break;
+        }
+        clientOnFlag_mutex.unlock();
+
+
+        valread = read(sock, buffer, 1024);
+        std::cout << "Received: " << buffer << std::endl;
+
+        if((buffer[0] == 'H') && (buffer[1] == 'D') && (buffer[2] == 'R') && (buffer[3] == ':') && (valread == 20) )
+            break;
+        else
+            memset(buffer, 0, sizeof(buffer));
+
+    }
 
     cols = static_cast<int>((buffer[4] << 24) | (buffer[5] << 16) | (buffer[6] << 8) | buffer[7]);
     rows = static_cast<int>((buffer[8] << 24) | (buffer[9] << 16) | (buffer[10] << 8) |  buffer[11]);
@@ -73,16 +97,31 @@ void TcpClient::runClient()
     std::cout << "step: " << std::hex << step << std::endl;
     std::cout << "type: " << std::hex << type << std::endl;
 
-    std::string ack = "ACK!";
-    std::string fin = "FIN!";
-    std::string pause = "PAUSE";
-    std::string play = "PLAY";
-    send(sock, ack.c_str(), ack.size(), 0);
-    // Close the socket
-
     size_t frameSize = (cols * rows * 3);
 
     std::cout << "s: " << std::dec << frameSize << std::endl;
+
+    while(true)
+    {
+
+        clientOnFlag_mutex.lock();
+        if(!clientOnFlag)
+        {
+            clientOnFlag_mutex.unlock();
+            break;
+        }
+        clientOnFlag_mutex.unlock();
+
+
+        send(sock, ack.c_str(), ack.size(), 0);
+
+        valread = read(sock, buffer, 1024);
+
+        if((buffer[0] == 'A') && (buffer[1] == 'C') && (buffer[2] == 'K') && (buffer[3] == '!'))
+            break;
+
+    }
+
 
     if(m_data != NULL)
         delete[] m_data;

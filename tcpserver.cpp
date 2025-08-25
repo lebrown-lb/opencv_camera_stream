@@ -122,6 +122,8 @@ void TcpServer::runServer()
         bool hdr_flg = false;
         bool clientStreamFlag = true;
         std::string rsp;
+        std::string ack = "ACK!";
+
         while(true)
         {
             serverOnFlag_mutex.lock();
@@ -158,6 +160,7 @@ void TcpServer::runServer()
                     if (rsp == "ACK!")
                     {
                         hdr_flg = true;
+                        send(new_socket, ack.c_str(), ack.size(), 0);
                         buffer[0] = '\0';
                         buffer[1] = '\0';
                         rsp = "";

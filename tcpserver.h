@@ -27,6 +27,8 @@ signals:
     void serverClosed();
 
 private:
+    void removeUnseenCharacters(std::string& s);
+    bool substringCheck(std::string& a, std::string& b, size_t *idx);
     void buildMatHeader(cv::Mat & src, uint8_t* data);
     void printSocketStatus(SOCKET_STATUS s);
     unsigned int m_port = 8080;

@@ -35,6 +35,7 @@ signals:
     void ctrlMessageSent(bool x);
 
 private:
+    bool substringCheck(std::string a, std::string b, size_t *idx);
     std::string m_ipAddress;
     unsigned int m_port;
     unsigned char * m_data = NULL;

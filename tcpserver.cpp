@@ -121,8 +121,12 @@ void TcpServer::runServer()
         bool local_newDataFlg = false;
         bool hdr_flg = false;
         bool clientStreamFlag = true;
+        size_t idx;
         std::string rsp;
         std::string ack = "ACK!";
+        std::string fin = "FIN!";
+        std::string pause = "PAUSE";
+        std::string play = "PLAY";
 
         while(true)
         {
@@ -192,42 +196,54 @@ void TcpServer::runServer()
 
                     }
 
+                    ssize_t valread;
                     while (true)
                     {
-                        ssize_t valread = read(new_socket, buffer, 1024);
+                        serverOnFlag_mutex.lock();
+                        if(!serverOnFlag)
+                        {
+                            serverOnFlag_mutex.unlock();
+                            break;
+                        }
+                        serverOnFlag_mutex.unlock();
+
+
+                         valread = read(new_socket, buffer, 1024);
                         buffer[valread] = '\0';
                         rsp = std::string(buffer);
                         if(rsp != "" && rsp != "ACK!")
                             std::cout << "rsp:" << rsp << std::endl;
 
-                        if(rsp == "ACK!")
-                        {
-                            buffer[0] = '\0';
-                            buffer[1] = '\0';
-                            rsp = "";
-                            break;
-                        }
-                        else if(rsp == "FIN!")
+                        if(!valread)
+                            continue;
+
+                        else if(substringCheck(rsp,fin,&idx))
                         {
                             serverOnFlag_mutex.lock();
                             serverOnFlag = false;
                             serverOnFlag_mutex.unlock();
                             break;
                         }
-                        else if(rsp == "PAUSE")
+                        else if(substringCheck(rsp,pause,&idx))
                         {
+                            std::cout << "PAUSE" << std::endl;
                             clientStreamFlag = false;
-                            buffer[0] = '\0';
                             rsp = "";
                             break;
                         }
-                        else if(rsp == "PLAY")
+                        else if(substringCheck(rsp,play,&idx))
                         {
+                            std::cout << "PLAY" << std::endl;
                             clientStreamFlag = true;
-                            buffer[0] = '\0';
                             rsp = "";
                             break;
                         }
+                        else if(substringCheck(rsp,ack,&idx))
+                        {
+                            rsp = "";
+                            break;
+                        }
+                        memset(buffer, 0, 1024);
 
                     }
 
@@ -253,6 +269,35 @@ void TcpServer::runServer()
     close(server_fd);
 
     emit serverClosed();
+
+}
+
+void TcpServer::removeUnseenCharacters(std::string &s)
+{
+    // Remove characters that are not printable (e.g., control characters, non-ASCII)
+    s.erase(std::remove_if(s.begin(), s.end(), [](unsigned char c) {
+                return !std::isprint(c); // Keep only printable characters
+            }), s.end());
+
+}
+
+bool TcpServer::substringCheck(std::string& a, std::string& b, size_t *idx)
+{
+    size_t pos;
+
+    removeUnseenCharacters(a);
+    removeUnseenCharacters(b);
+
+    //std::cout << "[" << a << "=" << b << "]:" << (a == b) << std::endl;
+    if(a == b)
+        return true;
+
+    pos = a.find(b);
+    *idx = pos;
+    if(pos != std::string::npos)
+        return true;
+    else
+        return false;
 
 }
 

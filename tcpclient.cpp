@@ -57,13 +57,15 @@ void TcpClient::runClient()
     }
 
     int rows, cols, type;
-    size_t step;
+    size_t step, idx;
     ssize_t valread;
 
+    std::string rsp;
     std::string ack = "ACK!";
     std::string fin = "FIN!";
     std::string pause = "PAUSE";
     std::string play = "PLAY";
+    std::string hdr = "HDR:";
 
     while(true)
     {
@@ -77,19 +79,35 @@ void TcpClient::runClient()
 
 
         valread = read(sock, buffer, 1024);
-        std::cout << "Received: " << buffer << std::endl;
 
-        if((buffer[0] == 'H') && (buffer[1] == 'D') && (buffer[2] == 'R') && (buffer[3] == ':') && (valread == 20) )
+        rsp = std::string((char*)buffer);
+
+
+
+        if(substringCheck(rsp,hdr,&idx))
+        {
+            rsp = "";
             break;
+        }
         else
+        {
             memset(buffer, 0, sizeof(buffer));
-
+            rsp = "";
+        }
     }
 
-    cols = static_cast<int>((buffer[4] << 24) | (buffer[5] << 16) | (buffer[6] << 8) | buffer[7]);
-    rows = static_cast<int>((buffer[8] << 24) | (buffer[9] << 16) | (buffer[10] << 8) |  buffer[11]);
-    step = static_cast<int>((buffer[12] << 24) | (buffer[13] << 16) | (buffer[14] << 8) | buffer[15]);
-    type = static_cast<int>((buffer[16] << 24) | (buffer[17] << 16) | (buffer[18] << 8) | buffer[19]);
+
+    if((idx + 20) > 1023)
+    {
+        std::cout << "HDR FRAME CLIPPED" << std::endl;
+        emit clientClosed();
+        return;
+    }
+
+    cols = static_cast<int>((buffer[idx + 4] << 24) | (buffer[idx + 5] << 16) | (buffer[idx + 6] << 8) | buffer[7]);
+    rows = static_cast<int>((buffer[idx + 8] << 24) | (buffer[idx + 9] << 16) | (buffer[idx + 10] << 8) |  buffer[idx + 11]);
+    step = static_cast<int>((buffer[idx + 12] << 24) | (buffer[idx + 13] << 16) | (buffer[idx + 14] << 8) | buffer[idx + 15]);
+    type = static_cast<int>((buffer[idx + 16] << 24) | (buffer[idx + 17] << 16) | (buffer[idx + 18] << 8) | buffer[idx + 19]);
 
 
     std::cout << "cols: " << std::hex << cols << std::endl;
@@ -117,7 +135,9 @@ void TcpClient::runClient()
 
         valread = read(sock, buffer, 1024);
 
-        if((buffer[0] == 'A') && (buffer[1] == 'C') && (buffer[2] == 'K') && (buffer[3] == '!'))
+        rsp = std::string((char*)buffer);
+
+        if(substringCheck(rsp,ack,&idx))
             break;
 
     }
@@ -129,32 +149,49 @@ void TcpClient::runClient()
     bool local_flg = false;
     bool stream_flg = true;
 
+    std::cout << "STREAM DATA" << std::endl;
+
     while(true)
     {
         if(stream_flg)
         {
             unsigned char* ptr = m_data;
             size_t count = 0;
-            while(count < frameSize)
+
+            size_t zeroDataCount = 0;
+
+            while((count < frameSize) && (zeroDataCount < 100))
             {
                 valread = read(sock, ptr, 1500 );
+
+                if(valread)
+                    zeroDataCount = 0;
+                else
+                    zeroDataCount++;
 
                 ptr += valread;
                 count += valread;
 
             }
 
-            frame_mutex.lock();
-            frame = cv::Mat(rows,cols,type,m_data,step);
-            frame_mutex.unlock();
-            emit updateFrame();
 
-            clientOnFlag_mutex.lock();
-            clientCtrlFlag_mutex.lock();
-            if(!clientCtrlFlag && clientOnFlag)
-                send(sock, ack.c_str(), ack.size(), 0);
-            clientCtrlFlag_mutex.unlock();
-            clientOnFlag_mutex.unlock();
+            if(zeroDataCount < 100)
+            {
+
+                frame_mutex.lock();
+                frame = cv::Mat(rows,cols,type,m_data,step);
+                frame_mutex.unlock();
+                emit updateFrame();
+
+                clientOnFlag_mutex.lock();
+                clientCtrlFlag_mutex.lock();
+                if(!clientCtrlFlag && clientOnFlag)
+                    send(sock, ack.c_str(), ack.size(), 0);
+                clientCtrlFlag_mutex.unlock();
+                clientOnFlag_mutex.unlock();
+            }
+            else
+                std::cout << "ZERO DATA COUNT" << std::endl;
         }
 
         clientCtrlFlag_mutex.lock();
@@ -197,4 +234,16 @@ void TcpClient::runClient()
     emit clientClosed();
 
 
+}
+
+bool TcpClient::substringCheck(std::string a, std::string b, size_t *idx)
+{
+    size_t pos;
+
+    pos = a.find(b);
+    *idx = pos;
+    if(pos != std::string::npos)
+        return true;
+    else
+        return false;
 }

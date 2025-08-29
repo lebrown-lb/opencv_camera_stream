@@ -8,7 +8,10 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <fcntl.h>
+#include <errno.h>
 #include <unistd.h>
+#include <chrono>
 
 #include <QMutex>
 #include <QThread>
@@ -41,6 +44,20 @@ void TcpClient::runClient()
         emit clientClosed();
         return;
     }
+
+    int flags = fcntl(sock, F_GETFL, 0);
+    if (flags == -1) {
+        std::cout << "FCNTL ERROR 1" << std::endl;
+        emit clientClosed();
+        return;
+    }
+    if (fcntl(sock, F_SETFL, flags | O_NONBLOCK) == -1) {
+        std::cout << "FCNTL ERROR 2" << std::endl;
+        emit clientClosed();
+        return;
+    }
+
+
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(m_port);
     // Convert IPv4 and IPv6 addresses from text to binary form
@@ -50,11 +67,65 @@ void TcpClient::runClient()
         return;
     }
     // Connect to the server
-    if (::connect(sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
+
+    int connect_status = ::connect(sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr));
+    if (connect_status < 0 && errno != EINPROGRESS)
+    {
         std::cout << "Connection Failed" << std::endl;
         emit clientClosed();
         return;
     }
+
+
+    fd_set write_fds;
+    FD_ZERO(&write_fds);
+    FD_SET(sock, &write_fds);
+
+    struct timeval tv;
+    tv.tv_sec = 10; // Timeout after 10 seconds
+    tv.tv_usec = 0;
+
+    int sel_ret = select(sock + 1, NULL, &write_fds, NULL, &tv);
+    if (sel_ret < 0)
+    {
+        std::cout << "select Failed" << std::endl;
+        emit clientClosed();
+        return;
+    }
+    else if (sel_ret == 0)
+    {
+        std::cout << "CONNECTION TIMEOUT" << std::endl;
+        emit clientClosed();
+        return;
+    }
+    else
+    {
+        // Check if the socket is writable (connection established)
+        if (FD_ISSET(sock, &write_fds))
+        {
+            int error = 0;
+            socklen_t len = sizeof(error);
+            if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &error, &len) < 0)
+            {
+                std::cout << "GETSOCKOPT ERROR" << std::endl;
+                emit clientClosed();
+                return;
+            }
+            if (error == 0)
+            {
+                std::cout << "CONNECTION ESTABLISHED" << std::endl;
+            }
+            else
+            {
+                std::cout << "CONNECTION FAILED" << std::endl;
+                emit clientClosed();
+                return;
+            }
+        }
+    }
+
+
+
 
     int rows, cols, type;
     size_t step, idx;
@@ -80,19 +151,20 @@ void TcpClient::runClient()
 
         valread = read(sock, buffer, 1024);
 
-        rsp = std::string((char*)buffer);
-
-
-
-        if(substringCheck(rsp,hdr,&idx))
+        if(valread > 0)
         {
-            rsp = "";
-            break;
-        }
-        else
-        {
-            memset(buffer, 0, sizeof(buffer));
-            rsp = "";
+            rsp = std::string((char*)buffer);
+
+            if(substringCheck(rsp,hdr,&idx))
+            {
+                rsp = "";
+                break;
+            }
+            else
+            {
+                memset(buffer, 0, sizeof(buffer));
+                rsp = "";
+            }
         }
     }
 
@@ -117,30 +189,40 @@ void TcpClient::runClient()
 
     size_t frameSize = (cols * rows * 3);
 
-    std::cout << "s: " << std::dec << frameSize << std::endl;
+    std::cout << "frameSize: " << std::dec << frameSize << std::endl;
 
-    while(true)
-    {
+    send(sock, ack.c_str(), ack.size(), 0);
 
-        clientOnFlag_mutex.lock();
-        if(!clientOnFlag)
-        {
-            clientOnFlag_mutex.unlock();
-            break;
-        }
-        clientOnFlag_mutex.unlock();
+    // size_t count = 10;
+
+    // while(true)
+    // {
+
+    //     clientOnFlag_mutex.lock();
+    //     if(!clientOnFlag)
+    //     {
+    //         clientOnFlag_mutex.unlock();
+    //         break;
+    //     }
+    //     clientOnFlag_mutex.unlock();
+
+    //     if(count)
+    //         send(sock, ack.c_str(), ack.size(), 0);
 
 
-        send(sock, ack.c_str(), ack.size(), 0);
+    //     valread = read(sock, buffer, 1024);
 
-        valread = read(sock, buffer, 1024);
+    //     if(count && valread)
+    //     {
+    //         std::cout << "buffer:" << buffer << std::endl;
+    //         count--;
+    //     }
+    //     rsp = std::string((char*)buffer);
 
-        rsp = std::string((char*)buffer);
+    //     if(substringCheck(rsp,ack,&idx))
+    //         break;
 
-        if(substringCheck(rsp,ack,&idx))
-            break;
-
-    }
+    // }
 
 
     if(m_data != NULL)
@@ -148,6 +230,7 @@ void TcpClient::runClient()
     m_data = new unsigned char[frameSize];
     bool local_flg = false;
     bool stream_flg = true;
+    bool validFrame;
 
     std::cout << "STREAM DATA" << std::endl;
 
@@ -155,43 +238,64 @@ void TcpClient::runClient()
     {
         if(stream_flg)
         {
+
             unsigned char* ptr = m_data;
             size_t count = 0;
+            long time = 0;
 
-            size_t zeroDataCount = 0;
+            std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
+            std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
 
-            while((count < frameSize) && (zeroDataCount < 100))
+            validFrame = true;
+            while(count < frameSize)
             {
                 valread = read(sock, ptr, 1500 );
 
-                if(valread)
-                    zeroDataCount = 0;
-                else
-                    zeroDataCount++;
+                if((ptr + valread) > (m_data + frameSize))
+                {
+                    //invalid frame
+                    validFrame = false;
+                    break;
+                }
+                if(valread > 0)
+                {
+                    ptr += valread;
+                    count += valread;
+                }
 
-                ptr += valread;
-                count += valread;
 
+
+                end = std::chrono::steady_clock::now();
+                time = std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
+
+                //std::cout << "[" << time << "]count:" << count << std::endl;
+
+                if(time > 1000000)
+                {
+                    validFrame = false;
+                    std::cout << "TIMEOUT" << std::endl;
+                    break;
+                }
             }
 
 
-            if(zeroDataCount < 100)
+            if(validFrame)
             {
 
                 frame_mutex.lock();
                 frame = cv::Mat(rows,cols,type,m_data,step);
                 frame_mutex.unlock();
                 emit updateFrame();
-
-                clientOnFlag_mutex.lock();
-                clientCtrlFlag_mutex.lock();
-                if(!clientCtrlFlag && clientOnFlag)
-                    send(sock, ack.c_str(), ack.size(), 0);
-                clientCtrlFlag_mutex.unlock();
-                clientOnFlag_mutex.unlock();
             }
             else
-                std::cout << "ZERO DATA COUNT" << std::endl;
+                std::cout << "INVALID FRAME" << std::endl;
+
+            clientOnFlag_mutex.lock();
+            clientCtrlFlag_mutex.lock();
+            if(!clientCtrlFlag && clientOnFlag)
+                send(sock, ack.c_str(), ack.size(), 0);
+            clientCtrlFlag_mutex.unlock();
+            clientOnFlag_mutex.unlock();
         }
 
         clientCtrlFlag_mutex.lock();

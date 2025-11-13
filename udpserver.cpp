@@ -1,15 +1,8 @@
-#include "tcpserver.h"
+#include "udpserver.h"
 
 #include <QMutex>
-
 #include <iostream>
-#include <string>
-#include <memory>
-#include <cstring>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <unistd.h>
+
 
 
 extern QMutex  frame_mutex;
@@ -21,19 +14,19 @@ extern bool serverOnFlag;
 extern QMutex newDataFlag_mutex;
 extern bool newDataFlg;
 
-TcpServer::TcpServer(QObject *parent)
+UdpServer::UdpServer(QObject *parent)
     : QObject{parent}
 {}
 
-void TcpServer::runServer()
+void UdpServer::runServer()
 {
-    int server_fd, new_socket;
-    struct sockaddr_in address;
+    int server_fd;
+    struct sockaddr_in s_address, c_address;
     int opt = 1;
-    socklen_t addrlen = sizeof(address);
+
     char buffer[1024] = {0};
     // Creating socket file descriptor
-    if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
+    if ((server_fd = socket(AF_INET, SOCK_DGRAM, 0)) == 0) {
         std::cout << "socket failed" << std::endl;
         emit serverClosed();
         return;
@@ -44,76 +37,55 @@ void TcpServer::runServer()
         emit serverClosed();
         return;
     }
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(m_port);
+    struct timeval read_timeout;
+    read_timeout.tv_sec = 0;
+    read_timeout.tv_usec = 50;
+    setsockopt(server_fd, SOL_SOCKET, SO_RCVTIMEO, &read_timeout, sizeof read_timeout);
+
+
+    s_address.sin_family = AF_INET;
+    s_address.sin_addr.s_addr = INADDR_ANY;
+    s_address.sin_port = htons(m_port);
     // Bind the socket to the network address and port
-    if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) < 0) {
+    if (bind(server_fd, (struct sockaddr*)&s_address, sizeof(s_address)) < 0) {
         std::cout << "bind failed" << std::endl;
         emit serverClosed();
         return;
     }
-    // Start listening for incoming connections
-    if (listen(server_fd, 3) < 0) {
-        std::cout << "listen error" << std::endl;
-        emit serverClosed();
-        return;
-    }
+
     std::cout << "Server listening on port " << m_port << std::endl;
     // Accept incoming connection
 
-    fd_set read_fds;
-    struct timeval timeout;
+
     SOCKET_STATUS status = UNINITALIZED;
-    new_socket = -1;
 
-    while (true) {
-        FD_ZERO(&read_fds);
-        FD_SET(server_fd, &read_fds);
+    socklen_t len = sizeof(c_address);
+    int n = 0;
+    std::string rsp;
 
-        timeout.tv_sec = 1; // 5-second timeout
-        timeout.tv_usec = 0;
 
-        int ret = select(server_fd + 1, &read_fds, NULL, NULL, &timeout);
-
-        if (ret == -1)
+    while (true)
+    {
+        n = recvfrom(server_fd, (char *)buffer, 1023, 0, ( struct sockaddr *) &c_address, &len);
+        if (n > 0)
         {
-            status = SELECT_ERROR;
-            break;
-        }
-        else if (ret == 0)
-        {
-            // Timeout occurred, no new connection
-            // You can continue looping, or take other action
-            serverOnFlag_mutex.lock();
-            if(!serverOnFlag)
-                status = CLOSE_SIGNAL_RECEIVED;
-            serverOnFlag_mutex.unlock();
-
-            if(status == CLOSE_SIGNAL_RECEIVED)
-                break;
-            continue;
-        }
-        else
-        {
-            // Connection ready
-            if (FD_ISSET(server_fd, &read_fds))
+            buffer[n] = '\0';
+            rsp = std::string(buffer);
+            if (rsp == "CONNECT!")
             {
-                new_socket = accept(server_fd, (struct sockaddr*)&address, &addrlen);
-                if (new_socket == -1)
-                {
-                    status = ACCEPT_ERROR;
-                    break;
-
-                }
-                else
-                {
-                    // Process client_socket_fd
-                    status = CLIENT_CONNECTED;
-                    break;
-                }
+                status = CLIENT_CONNECTED;
+                break;
             }
         }
+
+        serverOnFlag_mutex.lock();
+        if(!serverOnFlag)
+            status = CLOSE_SIGNAL_RECEIVED;
+        serverOnFlag_mutex.unlock();
+
+        if(status == CLOSE_SIGNAL_RECEIVED)
+            break;
+
     }
 
     if(status == CLIENT_CONNECTED)
@@ -122,7 +94,6 @@ void TcpServer::runServer()
         bool hdr_flg = false;
         bool clientStreamFlag = true;
         size_t idx;
-        std::string rsp;
         std::string ack = "ACK!";
         std::string fin = "FIN!";
         std::string pause = "PAUSE";
@@ -155,16 +126,13 @@ void TcpServer::runServer()
                     frame_mutex.lock();
                     buildMatHeader(frame, data);
                     frame_mutex.unlock();
-                    send(new_socket, data, 20, 0);
+                    sendto(server_fd, data, 20, 0, (const struct sockaddr *) &c_address, len);
 
-                    ssize_t valread = read(new_socket, buffer, 1024);
-                    buffer[valread] = '\0';
-
-                    rsp = std::string(buffer);
+                    rsp = clientRead(server_fd, buffer, c_address);
                     if (rsp == "ACK!")
                     {
                         hdr_flg = true;
-                        send(new_socket, ack.c_str(), ack.size(), 0);
+                        //sendto(server_fd, ack.c_str(), ack.size(), 0, (const struct sockaddr *) &c_address, len);
                         buffer[0] = '\0';
                         buffer[1] = '\0';
                         rsp = "";
@@ -176,27 +144,28 @@ void TcpServer::runServer()
 
                     if(clientStreamFlag)
                     {
-                        frame_mutex.lock();
-                        bool dataSent = false;
-                        u_char * ptr = frame.data;
-                        size_t dataToSend;
-                        while(!dataSent)
-                        {
-                            dataToSend = (frame.dataend - ptr);
-                            //std::cout << "dataToSend:" << dataToSend << std::endl;
-                            if(dataToSend > 1500)
-                                dataToSend = 1500;
-                            else
-                                dataSent = true;
 
-                            send(new_socket, ptr, dataToSend, 0);
-                            ptr += dataToSend;
-                        }
-                        frame_mutex.unlock();
+                        std::cout << "[SEND FRAME]" << std::endl;
+                        // frame_mutex.lock();
+                        // bool dataSent = false;
+                        // u_char * ptr = frame.data;
+                        // size_t dataToSend;
+                        // while(!dataSent)
+                        // {
+                        //     dataToSend = (frame.dataend - ptr);
+                        //     //std::cout << "dataToSend:" << dataToSend << std::endl;
+                        //     if(dataToSend > 1500)
+                        //         dataToSend = 1500;
+                        //     else
+                        //         dataSent = true;
+
+                        //     send(new_socket, ptr, dataToSend, 0);
+                        //     ptr += dataToSend;
+                        // }
+                        // frame_mutex.unlock();
 
                     }
 
-                    ssize_t valread;
                     while (true)
                     {
                         serverOnFlag_mutex.lock();
@@ -208,16 +177,11 @@ void TcpServer::runServer()
                         serverOnFlag_mutex.unlock();
 
 
-                         valread = read(new_socket, buffer, 1024);
-                        buffer[valread] = '\0';
-                        rsp = std::string(buffer);
+                        rsp = clientRead(server_fd, buffer, c_address);
                         if(rsp != "" && rsp != "ACK!")
                             std::cout << "rsp:" << rsp << std::endl;
 
-                        if(!valread)
-                            continue;
-
-                        else if(substringCheck(rsp,fin,&idx))
+                        if(substringCheck(rsp,fin,&idx))
                         {
                             serverOnFlag_mutex.lock();
                             serverOnFlag = false;
@@ -246,9 +210,6 @@ void TcpServer::runServer()
                         memset(buffer, 0, 1024);
 
                     }
-
-
-
                 }
 
                 local_newDataFlg = false;
@@ -265,14 +226,37 @@ void TcpServer::runServer()
     else
         printSocketStatus(status);
 
-    close(new_socket);
     close(server_fd);
-
     emit serverClosed();
 
 }
 
-void TcpServer::removeUnseenCharacters(std::string &s)
+std::string UdpServer::clientRead(int sock_fd,char *buffer, sockaddr_in c_address)
+{
+    std::string rsp = "";
+    int valread = 0;
+    sockaddr_in tmp_address;
+    socklen_t len = sizeof(tmp_address);
+    valread = recvfrom(sock_fd, (char *)buffer, 1023, 0, ( struct sockaddr *) &tmp_address, &len);
+    if ((valread > 0) && (compare_sockaddr_in(c_address,tmp_address)))
+    {
+        buffer[valread] = '\0';
+        rsp = std::string(buffer);
+    }
+    else
+        buffer[0] = '\0';
+
+    return rsp;
+}
+
+bool UdpServer::compare_sockaddr_in(const sockaddr_in &sa1, const sockaddr_in &sa2)
+{
+    return (sa1.sin_family == sa2.sin_family &&
+            sa1.sin_port == sa2.sin_port &&
+            sa1.sin_addr.s_addr == sa2.sin_addr.s_addr);
+}
+
+void UdpServer::removeUnseenCharacters(std::string &s)
 {
     // Remove characters that are not printable (e.g., control characters, non-ASCII)
     s.erase(std::remove_if(s.begin(), s.end(), [](unsigned char c) {
@@ -281,7 +265,7 @@ void TcpServer::removeUnseenCharacters(std::string &s)
 
 }
 
-bool TcpServer::substringCheck(std::string& a, std::string& b, size_t *idx)
+bool UdpServer::substringCheck(std::string& a, std::string& b, size_t *idx)
 {
     size_t pos;
 
@@ -301,7 +285,7 @@ bool TcpServer::substringCheck(std::string& a, std::string& b, size_t *idx)
 
 }
 
-void TcpServer::buildMatHeader(cv::Mat &src, uint8_t* data)
+void UdpServer::buildMatHeader(cv::Mat &src, uint8_t* data)
 {
 
     int cols = src.cols;
@@ -345,7 +329,7 @@ void TcpServer::buildMatHeader(cv::Mat &src, uint8_t* data)
 
 }
 
-void TcpServer::printSocketStatus(SOCKET_STATUS s)
+void UdpServer::printSocketStatus(SOCKET_STATUS s)
 {
     switch (s) {
     case CLIENT_CONNECTED:

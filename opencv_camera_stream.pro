@@ -11,13 +11,13 @@ CONFIG += c++17
 SOURCES += \
     main.cpp \
     mainwindow.cpp \
-    tcpclient.cpp \
-    tcpserver.cpp
+    udpclient.cpp \
+    udpserver.cpp
 
 HEADERS += \
     mainwindow.h \
-    tcpclient.h \
-    tcpserver.h
+    udpclient.h \
+    udpserver.h
 INCLUDEPATH += /usr/include/opencv4
 
 LIBS += -lopencv_core \

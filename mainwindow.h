@@ -1,8 +1,8 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
-#include "tcpserver.h"
-#include "tcpclient.h"
+#include "udpserver.h"
+#include "udpclient.h"
 
 #include <string>
 #include <vector>
@@ -67,9 +67,9 @@ private:
     unsigned int m_prd = 1000/30;
     uint8_t m_mode;
     QThread * m_serverThread = NULL;
-    TcpServer * m_server = NULL;
+    UdpServer * m_server = NULL;
     QThread * m_clientThread = NULL;
-    TcpClient * m_client = NULL;
+    UdpClient * m_client = NULL;
 
 
 };

@@ -55,7 +55,7 @@ MainWindow::MainWindow(QWidget *parent)
         connect(m_timer, SIGNAL(timeout()), this, SLOT(updateStream()));
 
         m_serverThread = new QThread(this);
-        m_server = new TcpServer();
+        m_server = new UdpServer();
         m_server->moveToThread(m_serverThread);
 
         connect(this,SIGNAL(startServer()),m_server,SLOT(runServer()));
@@ -67,7 +67,7 @@ MainWindow::MainWindow(QWidget *parent)
     ui->address_lbl->setText(QString::fromStdString(getNetworkAddress()));
 
     m_clientThread = new QThread(this);
-    m_client = new TcpClient();
+    m_client = new UdpClient();
     m_client->moveToThread(m_clientThread);
 
     connect(this,SIGNAL(startClient()),m_client,SLOT(runClient()));

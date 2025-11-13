@@ -1,20 +1,13 @@
-#include "tcpclient.h"
+#include "udpclient.h"
 
 #include <iostream>
-#include <string>
-#include <memory>
-#include <cstring>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <unistd.h>
 #include <chrono>
 
 #include <QMutex>
 #include <QThread>
+
+#define MAXTXLEN        1425
+#define NETWORK_MTU     1400
 
 extern QMutex  frame_mutex;
 extern cv::Mat frame;
@@ -26,20 +19,20 @@ extern QMutex clientCtrlFlag_mutex;
 extern bool clientCtrlFlag;
 
 
-TcpClient::TcpClient(QObject *parent)
+UdpClient::UdpClient(QObject *parent)
     : QObject{parent}
 {}
 
-void TcpClient::runClient()
+void UdpClient::runClient()
 {
     std::cout << "IP ADDRESS: " << m_ipAddress << std::endl;
     std::cout << "PORT: " << m_port << std::endl;
 
     int sock = 0;
     struct sockaddr_in serv_addr;
-    unsigned char buffer[1024] = {0};
+    unsigned char buffer[MAXTXLEN] = {0};
     // Creating socket file descriptor
-    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+    if ((sock = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
         std::cout << "Socket creation error" << std::endl;
         emit clientClosed();
         return;
@@ -48,11 +41,13 @@ void TcpClient::runClient()
     int flags = fcntl(sock, F_GETFL, 0);
     if (flags == -1) {
         std::cout << "FCNTL ERROR 1" << std::endl;
+        close(sock);
         emit clientClosed();
         return;
     }
     if (fcntl(sock, F_SETFL, flags | O_NONBLOCK) == -1) {
         std::cout << "FCNTL ERROR 2" << std::endl;
+        close(sock);
         emit clientClosed();
         return;
     }
@@ -63,75 +58,23 @@ void TcpClient::runClient()
     // Convert IPv4 and IPv6 addresses from text to binary form
     if (inet_pton(AF_INET, m_ipAddress.c_str(), &serv_addr.sin_addr) <= 0) {
         std::cout << "Invalid address/ Address not supported" << std::endl;
+        close(sock);
         emit clientClosed();
         return;
     }
     // Connect to the server
-
-    int connect_status = ::connect(sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr));
-    if (connect_status < 0 && errno != EINPROGRESS)
-    {
-        std::cout << "Connection Failed" << std::endl;
-        emit clientClosed();
-        return;
-    }
-
-
-    fd_set write_fds;
-    FD_ZERO(&write_fds);
-    FD_SET(sock, &write_fds);
-
-    struct timeval tv;
-    tv.tv_sec = 10; // Timeout after 10 seconds
-    tv.tv_usec = 0;
-
-    int sel_ret = select(sock + 1, NULL, &write_fds, NULL, &tv);
-    if (sel_ret < 0)
-    {
-        std::cout << "select Failed" << std::endl;
-        emit clientClosed();
-        return;
-    }
-    else if (sel_ret == 0)
-    {
-        std::cout << "CONNECTION TIMEOUT" << std::endl;
-        emit clientClosed();
-        return;
-    }
-    else
-    {
-        // Check if the socket is writable (connection established)
-        if (FD_ISSET(sock, &write_fds))
-        {
-            int error = 0;
-            socklen_t len = sizeof(error);
-            if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &error, &len) < 0)
-            {
-                std::cout << "GETSOCKOPT ERROR" << std::endl;
-                emit clientClosed();
-                return;
-            }
-            if (error == 0)
-            {
-                std::cout << "CONNECTION ESTABLISHED" << std::endl;
-            }
-            else
-            {
-                std::cout << "CONNECTION FAILED" << std::endl;
-                emit clientClosed();
-                return;
-            }
-        }
-    }
-
-
-
+    std::string rsp;
+    std::string con = "CONNECT!";
+    socklen_t len = sizeof(serv_addr);
+    sendto(sock,con.c_str(),con.size(),0,( struct sockaddr *)&serv_addr,len);
+    auto start = std::chrono::high_resolution_clock::now();
 
     int rows, cols, type;
     size_t step, idx;
     ssize_t valread;
+    sockaddr_in tmp_address;
 
-    std::string rsp;
+
     std::string ack = "ACK!";
     std::string fin = "FIN!";
     std::string pause = "PAUSE";
@@ -149,10 +92,22 @@ void TcpClient::runClient()
         clientOnFlag_mutex.unlock();
 
 
-        valread = read(sock, buffer, 1024);
+        valread = recvfrom(sock, (char *)buffer, MAXTXLEN-1, 0, ( struct sockaddr *) &tmp_address, &len);
 
-        if(valread > 0)
+        auto end0 = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> duration = end0 - start;
+
+        if(duration.count() > 4)
         {
+            std::cout << "Connection Timeout" << std::endl;
+            close(sock);
+            emit clientClosed();
+            return;
+        }
+
+        if ((valread > 0) && (compare_sockaddr_in(serv_addr,tmp_address)))
+        {
+            buffer[valread] = '\0';
             rsp = std::string((char*)buffer);
 
             if(substringCheck(rsp,hdr,&idx))
@@ -166,12 +121,15 @@ void TcpClient::runClient()
                 rsp = "";
             }
         }
+        else
+            buffer[0] = '\0';
     }
 
 
     if((idx + 20) > 1023)
     {
         std::cout << "HDR FRAME CLIPPED" << std::endl;
+        close(sock);
         emit clientClosed();
         return;
     }
@@ -188,49 +146,25 @@ void TcpClient::runClient()
     std::cout << "type: " << std::hex << type << std::endl;
 
     size_t frameSize = (cols * rows * 3);
+    size_t last_packet_len = !(frameSize % NETWORK_MTU) ? NETWORK_MTU : (frameSize % NETWORK_MTU) ;
+    size_t packet_count;
+
+    if(last_packet_len == NETWORK_MTU)
+        packet_count = frameSize / NETWORK_MTU;
+    else
+        packet_count = (frameSize / NETWORK_MTU) + 1;
 
     std::cout << "frameSize: " << std::dec << frameSize << std::endl;
 
-    send(sock, ack.c_str(), ack.size(), 0);
-
-    // size_t count = 10;
-
-    // while(true)
-    // {
-
-    //     clientOnFlag_mutex.lock();
-    //     if(!clientOnFlag)
-    //     {
-    //         clientOnFlag_mutex.unlock();
-    //         break;
-    //     }
-    //     clientOnFlag_mutex.unlock();
-
-    //     if(count)
-    //         send(sock, ack.c_str(), ack.size(), 0);
-
-
-    //     valread = read(sock, buffer, 1024);
-
-    //     if(count && valread)
-    //     {
-    //         std::cout << "buffer:" << buffer << std::endl;
-    //         count--;
-    //     }
-    //     rsp = std::string((char*)buffer);
-
-    //     if(substringCheck(rsp,ack,&idx))
-    //         break;
-
-    // }
-
+    len = sizeof(serv_addr);
+    sendto(sock,ack.c_str(),ack.size(),0,( struct sockaddr *)&serv_addr,len);
 
     if(m_data != NULL)
         delete[] m_data;
     m_data = new unsigned char[frameSize];
     bool local_flg = false;
     bool stream_flg = true;
-    bool validFrame;
+    bool frameEnd;
 
     std::cout << "STREAM DATA" << std::endl;
 
@@ -239,28 +173,29 @@ void TcpClient::runClient()
         if(stream_flg)
         {
 
-            unsigned char* ptr = m_data;
-            size_t count = 0;
+            unsigned char* data_ptr = nullptr;
+            size_t data_len = 0;
+            uint16_t packet_id;
             long time = 0;
+            bool parse_success = false;
 
             std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
             std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
 
-            validFrame = true;
-            while(count < frameSize)
+            frameEnd = false;
+            while(!frameEnd)
             {
-                valread = read(sock, ptr, 1500 );
+                valread = recvfrom(sock, (char *)buffer, MAXTXLEN-1, 0, ( struct sockaddr *) &tmp_address, &len);
+                if ((valread > 0) && (compare_sockaddr_in(serv_addr,tmp_address)))
+                {
+                    data_ptr = parse_packet(buffer,MAXTXLEN,valread,&data_len,&packet_id,&parse_success);
+                    if(parse_success)
+                    {
+                        if((packet_id == packet_count) && (data_len > last_packet_len))
+                            data_len = last_packet_len;
+                        insert_frame_data(data_ptr,data_len,packet_id,m_data,frameSize);
 
-                if((ptr + valread) > (m_data + frameSize))
-                {
-                    //invalid frame
-                    validFrame = false;
-                    break;
-                }
-                if(valread > 0)
-                {
-                    ptr += valread;
-                    count += valread;
+                    }
                 }
 
 
@@ -272,28 +207,25 @@ void TcpClient::runClient()
 
                 if(time > 1000000)
                 {
-                    validFrame = false;
                     std::cout << "TIMEOUT" << std::endl;
                     break;
                 }
             }
 
 
-            if(validFrame)
-            {
 
-                frame_mutex.lock();
-                frame = cv::Mat(rows,cols,type,m_data,step);
-                frame_mutex.unlock();
-                emit updateFrame();
-            }
-            else
-                std::cout << "INVALID FRAME" << std::endl;
+
+            frame_mutex.lock();
+            frame = cv::Mat(rows,cols,type,m_data,step);
+            frame_mutex.unlock();
+            emit updateFrame();
+
+            socklen_t len = sizeof(serv_addr);
 
             clientOnFlag_mutex.lock();
             clientCtrlFlag_mutex.lock();
             if(!clientCtrlFlag && clientOnFlag)
-                send(sock, ack.c_str(), ack.size(), 0);
+                sendto(sock,ack.c_str(),ack.size(),0,( struct sockaddr *)&serv_addr,len);
             clientCtrlFlag_mutex.unlock();
             clientOnFlag_mutex.unlock();
         }
@@ -305,13 +237,13 @@ void TcpClient::runClient()
             if(stream_flg)
             {
                 stream_flg = false;
-                send(sock, pause.c_str(), pause.size(), 0);
+                sendto(sock,pause.c_str(),pause.size(),0,( struct sockaddr *)&serv_addr,len);
 
             }
             else
             {
                 stream_flg = true;
-                send(sock, play.c_str(), play.size(), 0);
+                sendto(sock,play.c_str(),play.size(),0,( struct sockaddr *)&serv_addr,len);
             }
             emit ctrlMessageSent(stream_flg);
             clientCtrlFlag = false;
@@ -321,7 +253,7 @@ void TcpClient::runClient()
         clientOnFlag_mutex.lock();
         if(!clientOnFlag)
         {
-            send(sock, fin.c_str(), fin.size(), 0);
+            sendto(sock,fin.c_str(),fin.size(),0,( struct sockaddr *)&serv_addr,len);
             local_flg = true;
         }
         clientOnFlag_mutex.unlock();
@@ -333,14 +265,77 @@ void TcpClient::runClient()
     }
 
     close(sock);
-
-
     emit clientClosed();
-
-
 }
 
-bool TcpClient::substringCheck(std::string a, std::string b, size_t *idx)
+unsigned char *UdpClient::parse_packet(unsigned char *buffer, size_t buffer_len, size_t tx_len, size_t *data_len, uint16_t *packet_id, bool *success)
+{
+
+    if ((tx_len == 0) ||(tx_len < 4))
+    {
+        *success = false;
+        return nullptr;
+    }
+
+    bool start = false;
+    bool end = false;
+    unsigned char* data_ptr = nullptr;
+    for(size_t i = 0; i <= buffer_len - 4; i++)
+    {
+        if((buffer[i] == 'F') && (buffer[i+1] == 'R') && (buffer[i+2] == 'M') && (buffer[i+3] == ':'))
+        {
+            if((i < (buffer_len - 7)) && !start)
+            {
+                *packet_id = ((uint16_t)buffer[i+4] << 8) | (uint16_t)buffer[i+5];
+                start = true;
+                data_ptr = buffer + i + 6;
+            }
+        }
+
+        if((buffer[i] == 'E') && (buffer[i+1] == 'N') && (buffer[i+2] == 'D') && (buffer[i+3] == ';') && start)
+        {
+            *data_len = (buffer + i) - data_ptr;
+            *success = true;
+            end = true;
+        }
+
+        if(start && !end && (i == (buffer_len - 4)))
+        {
+            *data_len = (buffer + buffer_len) - data_ptr;
+            if(*data_len > NETWORK_MTU)
+                *data_len = NETWORK_MTU;
+            *success = true;
+
+        }
+
+
+    }
+
+    return data_ptr;
+}
+
+void UdpClient::insert_frame_data(unsigned char *data_ptr, size_t data_len, uint16_t packet_id, unsigned char *frame, size_t framesize)
+{
+    size_t ofst = (packet_id - 1) * NETWORK_MTU;
+
+    if((ofst + data_len) > framesize)
+    {
+        std::cout << "FRAME OVERRUN" << std::endl;
+        return;
+    }
+
+    memcpy(frame + ofst,data_ptr,data_len);
+    return;
+}
+
+bool UdpClient::compare_sockaddr_in(const sockaddr_in &sa1, const sockaddr_in &sa2)
+{
+    return (sa1.sin_family == sa2.sin_family &&
+            sa1.sin_port == sa2.sin_port &&
+            sa1.sin_addr.s_addr == sa2.sin_addr.s_addr);
+}
+
+bool UdpClient::substringCheck(std::string a, std::string b, size_t *idx)
 {
     size_t pos;
 

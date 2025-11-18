@@ -3,7 +3,8 @@
 #include <QMutex>
 #include <iostream>
 
-
+#define MAXTXLEN        1425
+#define NETWORK_MTU     1400
 
 extern QMutex  frame_mutex;
 extern cv::Mat frame;
@@ -24,7 +25,7 @@ void UdpServer::runServer()
     struct sockaddr_in s_address, c_address;
     int opt = 1;
 
-    char buffer[1024] = {0};
+    char buffer[MAXTXLEN] = {0};
     // Creating socket file descriptor
     if ((server_fd = socket(AF_INET, SOCK_DGRAM, 0)) == 0) {
         std::cout << "socket failed" << std::endl;
@@ -66,7 +67,7 @@ void UdpServer::runServer()
 
     while (true)
     {
-        n = recvfrom(server_fd, (char *)buffer, 1023, 0, ( struct sockaddr *) &c_address, &len);
+        n = recvfrom(server_fd, (char *)buffer, MAXTXLEN - 1, 0, ( struct sockaddr *) &c_address, &len);
         if (n > 0)
         {
             buffer[n] = '\0';
@@ -87,6 +88,10 @@ void UdpServer::runServer()
             break;
 
     }
+
+    size_t framesize;
+    size_t last_packet_len;
+    size_t packet_count;
 
     if(status == CLIENT_CONNECTED)
     {
@@ -125,14 +130,21 @@ void UdpServer::runServer()
                     uint8_t data[20];
                     frame_mutex.lock();
                     buildMatHeader(frame, data);
+                    framesize = frame.cols * frame.rows * 3;
                     frame_mutex.unlock();
+                    last_packet_len = !(framesize % NETWORK_MTU) ? NETWORK_MTU : (framesize % NETWORK_MTU);
+                    std::cout << "last_packet_len:" << last_packet_len << std::endl;
+                    if(last_packet_len == NETWORK_MTU)
+                        packet_count = framesize / NETWORK_MTU;
+                    else
+                        packet_count = (framesize / NETWORK_MTU) + 1;
+
                     sendto(server_fd, data, 20, 0, (const struct sockaddr *) &c_address, len);
 
                     rsp = clientRead(server_fd, buffer, c_address);
                     if (rsp == "ACK!")
                     {
                         hdr_flg = true;
-                        //sendto(server_fd, ack.c_str(), ack.size(), 0, (const struct sockaddr *) &c_address, len);
                         buffer[0] = '\0';
                         buffer[1] = '\0';
                         rsp = "";
@@ -144,26 +156,16 @@ void UdpServer::runServer()
 
                     if(clientStreamFlag)
                     {
-
-                        std::cout << "[SEND FRAME]" << std::endl;
-                        // frame_mutex.lock();
-                        // bool dataSent = false;
-                        // u_char * ptr = frame.data;
-                        // size_t dataToSend;
-                        // while(!dataSent)
-                        // {
-                        //     dataToSend = (frame.dataend - ptr);
-                        //     //std::cout << "dataToSend:" << dataToSend << std::endl;
-                        //     if(dataToSend > 1500)
-                        //         dataToSend = 1500;
-                        //     else
-                        //         dataSent = true;
-
-                        //     send(new_socket, ptr, dataToSend, 0);
-                        //     ptr += dataToSend;
-                        // }
-                        // frame_mutex.unlock();
-
+                        size_t tx_len;
+                        frame_mutex.lock();
+                        for(uint16_t i = 1; i <= packet_count; i++)
+                        {
+                            tx_len = build_packet(buffer,frame,i,last_packet_len,packet_count);
+                            if(tx_len == 0)
+                                continue;
+                            sendto(server_fd, buffer, tx_len, 0, (const struct sockaddr *) &c_address, len);
+                        }
+                        frame_mutex.unlock();
                     }
 
                     while (true)
@@ -207,7 +209,7 @@ void UdpServer::runServer()
                             rsp = "";
                             break;
                         }
-                        memset(buffer, 0, 1024);
+                        memset(buffer, 0, MAXTXLEN);
 
                     }
                 }
@@ -237,7 +239,7 @@ std::string UdpServer::clientRead(int sock_fd,char *buffer, sockaddr_in c_addres
     int valread = 0;
     sockaddr_in tmp_address;
     socklen_t len = sizeof(tmp_address);
-    valread = recvfrom(sock_fd, (char *)buffer, 1023, 0, ( struct sockaddr *) &tmp_address, &len);
+    valread = recvfrom(sock_fd, (char *)buffer, MAXTXLEN - 1, 0, ( struct sockaddr *) &tmp_address, &len);
     if ((valread > 0) && (compare_sockaddr_in(c_address,tmp_address)))
     {
         buffer[valread] = '\0';
@@ -247,6 +249,46 @@ std::string UdpServer::clientRead(int sock_fd,char *buffer, sockaddr_in c_addres
         buffer[0] = '\0';
 
     return rsp;
+}
+
+size_t UdpServer::build_packet(char *buffer, cv::Mat & frm , uint16_t packet_id, size_t last_packet_len, size_t packet_count)
+{
+    u_char * frm_ptr = frm.data;
+    size_t len;
+    size_t ofst;
+    buffer[0] = 'F';
+    buffer[1] = 'R';
+    buffer[2] = 'M';
+    buffer[3] = ':';
+    buffer[4] = (char)(packet_id >> 8);
+    buffer[5] = (char)packet_id;
+    len = 6;
+
+    ofst = (packet_id - 1) * NETWORK_MTU;
+
+    if(packet_id == packet_count)
+    {
+        if((frm_ptr + ofst + last_packet_len) > frm.dataend)
+        {
+            std::cout << "DATA SIZE ERROR" << std::endl;
+            return 0;
+        }
+        memcpy(buffer + len,frm_ptr + ofst, last_packet_len);
+        len += last_packet_len;
+    }
+    else
+    {
+        memcpy(buffer + len,frm_ptr + ofst, NETWORK_MTU);
+        len += NETWORK_MTU;
+    }
+
+    buffer[len] = 'E';
+    buffer[len + 1] = 'N';
+    buffer[len + 2] = 'D';
+    buffer[len + 3] = ';';
+    len += 4;
+
+    return len;
 }
 
 bool UdpServer::compare_sockaddr_in(const sockaddr_in &sa1, const sockaddr_in &sa2)

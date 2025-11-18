@@ -1,12 +1,13 @@
 #include "udpclient.h"
 
+
 #include <iostream>
 #include <chrono>
 
 #include <QMutex>
 #include <QThread>
 
-#define MAXTXLEN        1425
+#define MAXTXLEN        1410
 #define NETWORK_MTU     1400
 
 extern QMutex  frame_mutex;
@@ -172,12 +173,7 @@ void UdpClient::runClient()
     {
         if(stream_flg)
         {
-
-            unsigned char* data_ptr = nullptr;
-            size_t data_len = 0;
-            uint16_t packet_id;
             long time = 0;
-            bool parse_success = false;
 
             std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
             std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
@@ -185,21 +181,12 @@ void UdpClient::runClient()
             frameEnd = false;
             while(!frameEnd)
             {
-                valread = recvfrom(sock, (char *)buffer, MAXTXLEN-1, 0, ( struct sockaddr *) &tmp_address, &len);
+                valread = recvfrom(sock, (char *)buffer, MAXTXLEN, 0, ( struct sockaddr *) &tmp_address, &len);
+
                 if ((valread > 0) && (compare_sockaddr_in(serv_addr,tmp_address)))
                 {
-                    data_ptr = parse_packet(buffer,MAXTXLEN,valread,&data_len,&packet_id,&parse_success);
-                    if(parse_success)
-                    {
-                        if((packet_id == packet_count) && (data_len > last_packet_len))
-                            data_len = last_packet_len;
-                        insert_frame_data(data_ptr,data_len,packet_id,m_data,frameSize);
-
-                    }
+                    process_data(buffer,m_data,packet_count,last_packet_len,frameSize, &frameEnd);
                 }
-
-
-
                 end = std::chrono::steady_clock::now();
                 time = std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
 
@@ -211,6 +198,7 @@ void UdpClient::runClient()
                     break;
                 }
             }
+
 
 
 
@@ -268,50 +256,30 @@ void UdpClient::runClient()
     emit clientClosed();
 }
 
-unsigned char *UdpClient::parse_packet(unsigned char *buffer, size_t buffer_len, size_t tx_len, size_t *data_len, uint16_t *packet_id, bool *success)
+void UdpClient::process_data(unsigned char *buffer, unsigned char *data, size_t packet_count, size_t last_packet_len, size_t framesize, bool *frameend)
 {
+    uint16_t packet_id;
+    size_t data_len;
 
-    if ((tx_len == 0) ||(tx_len < 4))
+    if((buffer[0] == 'F') && (buffer[1] == 'R') && (buffer[2] == 'M') && (buffer[3] == ':'))
+        packet_id = (uint16_t)(buffer[4] << 8) | (uint16_t)buffer[5];
+    else
     {
-        *success = false;
-        return nullptr;
+        std::cout << "INVALID HEADER" << std::endl;
+        return;
     }
 
-    bool start = false;
-    bool end = false;
-    unsigned char* data_ptr = nullptr;
-    for(size_t i = 0; i <= buffer_len - 4; i++)
+    if(packet_id == packet_count)
     {
-        if((buffer[i] == 'F') && (buffer[i+1] == 'R') && (buffer[i+2] == 'M') && (buffer[i+3] == ':'))
-        {
-            if((i < (buffer_len - 7)) && !start)
-            {
-                *packet_id = ((uint16_t)buffer[i+4] << 8) | (uint16_t)buffer[i+5];
-                start = true;
-                data_ptr = buffer + i + 6;
-            }
-        }
-
-        if((buffer[i] == 'E') && (buffer[i+1] == 'N') && (buffer[i+2] == 'D') && (buffer[i+3] == ';') && start)
-        {
-            *data_len = (buffer + i) - data_ptr;
-            *success = true;
-            end = true;
-        }
-
-        if(start && !end && (i == (buffer_len - 4)))
-        {
-            *data_len = (buffer + buffer_len) - data_ptr;
-            if(*data_len > NETWORK_MTU)
-                *data_len = NETWORK_MTU;
-            *success = true;
-
-        }
-
-
+        //std::cout << "LAST PACKET" << std::endl;
+        data_len = last_packet_len;
+        *frameend = true;
     }
+    else
+        data_len = NETWORK_MTU;
 
-    return data_ptr;
+    insert_frame_data(buffer + 6,data_len,packet_id,data,framesize);
+    return;
 }
 
 void UdpClient::insert_frame_data(unsigned char *data_ptr, size_t data_len, uint16_t packet_id, unsigned char *frame, size_t framesize)

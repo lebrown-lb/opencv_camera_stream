@@ -1,6 +1,8 @@
 #ifndef UDPCLIENT_H
 #define UDPCLIENT_H
 
+
+
 #include <QObject>
 #include <string>
 #include <opencv2/opencv.hpp>
@@ -43,7 +45,7 @@ signals:
     void ctrlMessageSent(bool x);
 
 private:
-    unsigned char* parse_packet(unsigned char * buffer, size_t buffer_len, size_t tx_len, size_t* data_len, uint16_t * packet_id, bool * success);
+    void process_data(unsigned char* buffer,unsigned char * data, size_t packet_count, size_t last_packet_len, size_t framesize, bool * frameend);
     void insert_frame_data(unsigned char * data_ptr, size_t data_len, uint16_t packet_id, unsigned char * frame, size_t framesize);
     bool compare_sockaddr_in(const sockaddr_in& sa1, const sockaddr_in& sa2);
     bool substringCheck(std::string a, std::string b, size_t *idx);

@@ -36,6 +36,7 @@ signals:
 
 private:
     std::string clientRead(int sock_fd,char * buffer, sockaddr_in c_address);
+    size_t build_packet(char *buffer, cv::Mat & frm , uint16_t packet_id, size_t last_packet_len, size_t packet_count);
     bool compare_sockaddr_in(const sockaddr_in& sa1, const sockaddr_in& sa2);
     void removeUnseenCharacters(std::string& s);
     bool substringCheck(std::string& a, std::string& b, size_t *idx);

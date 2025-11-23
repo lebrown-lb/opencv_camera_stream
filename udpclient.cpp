@@ -1,14 +1,14 @@
 #include "udpclient.h"
 
-
 #include <iostream>
 #include <chrono>
 
 #include <QMutex>
 #include <QThread>
 
-#define MAXTXLEN        1410
+#define HDR_LEN         18
 #define NETWORK_MTU     1400
+#define MAXTXLEN        NETWORK_MTU + HDR_LEN
 
 extern QMutex  frame_mutex;
 extern cv::Mat frame;
@@ -127,7 +127,7 @@ void UdpClient::runClient()
     }
 
 
-    if((idx + 20) > 1023)
+    if((idx + 20) > MAXTXLEN)
     {
         std::cout << "HDR FRAME CLIPPED" << std::endl;
         close(sock);
@@ -147,13 +147,6 @@ void UdpClient::runClient()
     std::cout << "type: " << std::hex << type << std::endl;
 
     size_t frameSize = (cols * rows * 3);
-    size_t last_packet_len = !(frameSize % NETWORK_MTU) ? NETWORK_MTU : (frameSize % NETWORK_MTU) ;
-    size_t packet_count;
-
-    if(last_packet_len == NETWORK_MTU)
-        packet_count = frameSize / NETWORK_MTU;
-    else
-        packet_count = (frameSize / NETWORK_MTU) + 1;
 
     std::cout << "frameSize: " << std::dec << frameSize << std::endl;
 
@@ -165,7 +158,40 @@ void UdpClient::runClient()
     m_data = new unsigned char[frameSize];
     bool local_flg = false;
     bool stream_flg = true;
+    size_t pkt_ofst;
     bool frameEnd;
+    CODEC decoder(true,cols,rows);
+
+    if(!decoder.m_open)
+    {
+        std::cout << "DECODER NOT OPEN" << std::endl;
+        close(sock);
+        emit clientClosed();
+        return;
+
+    }
+
+    AVPacket * pkt = av_packet_alloc();
+
+    if(pkt == nullptr)
+    {
+        std::cout << "AVPacket ALLOC FAILED" << std::endl;
+        close(sock);
+        emit clientClosed();
+        return;
+    }
+
+     AVFrame* av_frame = av_frame_alloc();
+
+    if(av_frame == nullptr)
+    {
+        std::cout << "AVFrame ALLOC FAILED" << std::endl;
+        av_packet_free(&pkt);
+        close(sock);
+        emit clientClosed();
+        return;
+    }
+
 
     std::cout << "STREAM DATA" << std::endl;
 
@@ -174,10 +200,12 @@ void UdpClient::runClient()
         if(stream_flg)
         {
             long time = 0;
+            int ret;
 
             std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
             std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
 
+            pkt_ofst = 0;
             frameEnd = false;
             while(!frameEnd)
             {
@@ -185,30 +213,45 @@ void UdpClient::runClient()
 
                 if ((valread > 0) && (compare_sockaddr_in(serv_addr,tmp_address)))
                 {
-                    process_data(buffer,m_data,packet_count,last_packet_len,frameSize, &frameEnd);
+                    frameEnd = process_data(buffer, MAXTXLEN, pkt, &pkt_ofst);
+                    if(frameEnd)
+                    {
+
+                        ret = decoder.send_packet(pkt);
+                        if(ret < 0)
+                            std::cout << "ERROR SENDING PACKET" << std::endl;
+                        else
+                        {
+                            while ((ret = decoder.recieve_frame(av_frame)) >= 0) {
+                                // Process the decoded AVFrame (e.g., display, save, further processing)
+                                //std::cout << "[" << av_frame->pts << "]:" << av_frame->width << std::endl;
+                                decoder.AVFrame_to_RGB(m_data,av_frame);
+                                av_frame_unref(av_frame); // Unreference the frame for reuse
+                            }
+                            if (ret != AVERROR(EAGAIN) && ret != AVERROR_EOF)
+                                std::cout << "FFMPEG ERROR" << std::endl;
+                        }
+
+                    }
                 }
                 end = std::chrono::steady_clock::now();
                 time = std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
 
                 //std::cout << "[" << time << "]count:" << count << std::endl;
 
-                if(time > 1000000)
+                if(time > 150000)
                 {
                     std::cout << "TIMEOUT" << std::endl;
                     break;
                 }
             }
 
-
-
-
-
             frame_mutex.lock();
             frame = cv::Mat(rows,cols,type,m_data,step);
             frame_mutex.unlock();
             emit updateFrame();
 
-            socklen_t len = sizeof(serv_addr);
+            len = sizeof(serv_addr);
 
             clientOnFlag_mutex.lock();
             clientCtrlFlag_mutex.lock();
@@ -252,34 +295,90 @@ void UdpClient::runClient()
 
     }
 
+    av_packet_free(&pkt);
+    av_frame_free(&av_frame);
     close(sock);
     emit clientClosed();
 }
 
-void UdpClient::process_data(unsigned char *buffer, unsigned char *data, size_t packet_count, size_t last_packet_len, size_t framesize, bool *frameend)
+bool UdpClient::process_data(unsigned char *buffer, size_t buffer_len, AVPacket *pkt, size_t *pkt_ofst)
 {
-    uint16_t packet_id;
-    size_t data_len;
+    uint16_t data_size;
+    size_t pts;
+    size_t dts;
+    size_t pkt_size;
+    //read HEADER
 
     if((buffer[0] == 'F') && (buffer[1] == 'R') && (buffer[2] == 'M') && (buffer[3] == ':'))
-        packet_id = (uint16_t)(buffer[4] << 8) | (uint16_t)buffer[5];
-    else
     {
-        std::cout << "INVALID HEADER" << std::endl;
-        return;
-    }
+        data_size = static_cast<uint16_t>((buffer[4] << 8) | buffer[5]);
+        pts = static_cast<size_t>((buffer[6] << 24) | (buffer[7] << 16) | (buffer[8] << 8) | buffer[9]);
+        dts = static_cast<size_t>((buffer[10] << 24) | (buffer[11] << 16) | (buffer[12] << 8) | buffer[13]);
+        pkt_size = static_cast<size_t>((buffer[14] << 24) | (buffer[15] << 16) | (buffer[16] << 8) | buffer[17]);
 
-    if(packet_id == packet_count)
-    {
-        //std::cout << "LAST PACKET" << std::endl;
-        data_len = last_packet_len;
-        *frameend = true;
+
+        if(!*pkt_ofst)
+        {
+            if(pkt->data != nullptr)
+                av_packet_unref(pkt);
+
+            if (av_new_packet(pkt, pkt_size) < 0) {
+                std::cout << "Error allocating new packet payload" << std::endl;
+                return false;
+            }
+
+            pkt->pts = pts;
+            pkt->dts = dts;
+
+            if(HDR_LEN + data_size > buffer_len)
+            {
+                std::cout << "BUFFER OVERRUN" << std::endl;
+                return false;
+            }
+
+            memcpy(pkt->data,buffer+HDR_LEN,data_size);
+            *pkt_ofst += data_size;
+
+            if(*pkt_ofst == pkt_size)
+            {
+                *pkt_ofst = 0;
+                return true;
+            }
+            else
+                return false;
+        }
+        else
+        {
+            if(pkt->pts != (int64_t)pts)
+            {
+                std::cout << "PACKET MISMATCH" << std::endl;
+                *pkt_ofst = 0;
+                return false;
+            }
+
+            if((*pkt_ofst + data_size) > (size_t)pkt->size)
+            {
+                std::cout << "PACKET BUFFER OVERRUN" << std::endl;
+                *pkt_ofst = 0;
+                return false;
+            }
+
+            memcpy(pkt->data + *pkt_ofst,buffer + HDR_LEN,data_size);
+            *pkt_ofst += data_size;
+
+            if(*pkt_ofst == pkt_size)
+            {
+                *pkt_ofst = 0;
+                return true;
+            }
+            else
+                return false;
+        }
+
     }
     else
-        data_len = NETWORK_MTU;
+        return false;
 
-    insert_frame_data(buffer + 6,data_len,packet_id,data,framesize);
-    return;
 }
 
 void UdpClient::insert_frame_data(unsigned char *data_ptr, size_t data_len, uint16_t packet_id, unsigned char *frame, size_t framesize)

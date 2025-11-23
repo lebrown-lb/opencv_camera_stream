@@ -26,7 +26,7 @@ class UdpServer : public QObject
 {
     Q_OBJECT
 public:
-    explicit UdpServer(QObject *parent = nullptr);
+    explicit UdpServer(QObject *parent = nullptr, size_t width = 1280,size_t height = 720);
 
 public slots:
     void runServer();
@@ -36,13 +36,15 @@ signals:
 
 private:
     std::string clientRead(int sock_fd,char * buffer, sockaddr_in c_address);
-    size_t build_packet(char *buffer, cv::Mat & frm , uint16_t packet_id, size_t last_packet_len, size_t packet_count);
+    size_t build_packet(char *buffer,uint8_t * data, uint16_t data_size, size_t pts, size_t dts, size_t avpkt_size, size_t buffer_len);
     bool compare_sockaddr_in(const sockaddr_in& sa1, const sockaddr_in& sa2);
     void removeUnseenCharacters(std::string& s);
     bool substringCheck(std::string& a, std::string& b, size_t *idx);
     void buildMatHeader(cv::Mat & src, uint8_t* data);
     void printSocketStatus(SOCKET_STATUS s);
     unsigned int m_port = 8080;
+    size_t m_width;
+    size_t m_height;
 };
 
 #endif // UDPSERVER_H

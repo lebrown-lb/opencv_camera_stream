@@ -1,10 +1,13 @@
 #include "udpserver.h"
+#include "codec.h"
 
 #include <QMutex>
 #include <iostream>
 
-#define MAXTXLEN        1425
+#define HDR_LEN         18
 #define NETWORK_MTU     1400
+#define MAXTXLEN        NETWORK_MTU + HDR_LEN
+
 
 extern QMutex  frame_mutex;
 extern cv::Mat frame;
@@ -15,8 +18,8 @@ extern bool serverOnFlag;
 extern QMutex newDataFlag_mutex;
 extern bool newDataFlg;
 
-UdpServer::UdpServer(QObject *parent)
-    : QObject{parent}
+UdpServer::UdpServer(QObject *parent,size_t width,size_t height)
+    : QObject{parent}, m_width(width), m_height(height)
 {}
 
 void UdpServer::runServer()
@@ -89,20 +92,68 @@ void UdpServer::runServer()
 
     }
 
-    size_t framesize;
-    size_t last_packet_len;
-    size_t packet_count;
+
 
     if(status == CLIENT_CONNECTED)
     {
+        CODEC encoder(false,m_width,m_height);
+        AVFrame * av_frame = nullptr;
+        AVPacket * pkt = nullptr;
         bool local_newDataFlg = false;
         bool hdr_flg = false;
         bool clientStreamFlag = true;
+        size_t ts = 0;
         size_t idx;
         std::string ack = "ACK!";
         std::string fin = "FIN!";
         std::string pause = "PAUSE";
         std::string play = "PLAY";
+
+        if(!encoder.m_open)
+        {
+            std::cout << "UNABLE TO OPEN ENCODER" << std::endl;
+            close(server_fd);
+            emit serverClosed();
+            return;
+        }
+
+        av_frame = av_frame_alloc();
+
+        if(av_frame == nullptr)
+        {
+            std::cout << "UNABLE TO ALLOCATE FRAME" << std::endl;
+            close(server_fd);
+            emit serverClosed();
+            return;
+        }
+
+        av_frame->width = encoder.m_codecContext->width;
+        av_frame->height = encoder.m_codecContext->height;
+        av_frame->format = encoder.m_codecContext->pix_fmt;
+
+        if(av_frame_get_buffer(av_frame, 0) < 0)
+        {
+            std::cout << "UNABLE TO ALLOCATE FRAME BUFFER" << std::endl;
+            av_frame_free(&av_frame);
+            close(server_fd);
+            emit serverClosed();
+            return;
+
+        }
+
+        pkt = av_packet_alloc();
+
+        if(av_frame == nullptr)
+        {
+            std::cout << "UNABLE TO ALLOCATE PACKET" << std::endl;
+            av_frame_free(&av_frame);
+            close(server_fd);
+            emit serverClosed();
+            return;
+        }
+
+
+
 
         while(true)
         {
@@ -130,14 +181,8 @@ void UdpServer::runServer()
                     uint8_t data[20];
                     frame_mutex.lock();
                     buildMatHeader(frame, data);
-                    framesize = frame.cols * frame.rows * 3;
                     frame_mutex.unlock();
-                    last_packet_len = !(framesize % NETWORK_MTU) ? NETWORK_MTU : (framesize % NETWORK_MTU);
-                    std::cout << "last_packet_len:" << last_packet_len << std::endl;
-                    if(last_packet_len == NETWORK_MTU)
-                        packet_count = framesize / NETWORK_MTU;
-                    else
-                        packet_count = (framesize / NETWORK_MTU) + 1;
+
 
                     sendto(server_fd, data, 20, 0, (const struct sockaddr *) &c_address, len);
 
@@ -146,7 +191,6 @@ void UdpServer::runServer()
                     {
                         hdr_flg = true;
                         buffer[0] = '\0';
-                        buffer[1] = '\0';
                         rsp = "";
                     }
                 }
@@ -156,16 +200,51 @@ void UdpServer::runServer()
 
                     if(clientStreamFlag)
                     {
-                        size_t tx_len;
+                        bool flg = false;
+                        int ret;
                         frame_mutex.lock();
-                        for(uint16_t i = 1; i <= packet_count; i++)
-                        {
-                            tx_len = build_packet(buffer,frame,i,last_packet_len,packet_count);
-                            if(tx_len == 0)
-                                continue;
-                            sendto(server_fd, buffer, tx_len, 0, (const struct sockaddr *) &c_address, len);
-                        }
+                        flg = encoder.mat_to_AVFrame(av_frame,frame);
                         frame_mutex.unlock();
+                        if(flg)
+                        {
+                            av_frame->pts = ts;
+                            ret = encoder.send_frame(av_frame);
+                            if(ret < 0)
+                                std::cout << "ERROR SENDING FRAME" << std::endl;
+                            else
+                            {
+                                while (ret >= 0)
+                                {
+                                    ret = encoder.recieve_packet(pkt);
+                                    if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+                                        break; // No more packets or end of stream
+                                    } else if (ret < 0) {
+                                        std::cout << "Error during encoding." << std::endl;
+                                        break;
+                                    }
+                                    //std::cout << "Encoded packet size: " << pkt->size << std::endl;
+                                    uint8_t * ptr = pkt->data;
+                                    uint8_t * end = pkt->data + pkt->size;
+                                    while(ptr < end)
+                                    {
+                                        size_t tx_size;
+                                        size_t dl = end - ptr;
+                                        if(dl > NETWORK_MTU)
+                                            dl = NETWORK_MTU;
+
+                                        tx_size = build_packet(buffer, ptr, dl, pkt->pts, pkt->dts, pkt->size, MAXTXLEN);
+
+                                        if(tx_size == MAXTXLEN)
+                                            sendto(server_fd, buffer, tx_size, 0, (const struct sockaddr *) &c_address, len);
+                                        ptr += dl;
+                                    }
+                                    av_packet_unref(pkt);
+                                }
+                                ts++;
+                            }
+
+
+                        }
                     }
 
                     while (true)
@@ -221,9 +300,8 @@ void UdpServer::runServer()
             }
         }
 
-        newDataFlag_mutex.lock();
-        newDataFlg = false;
-        newDataFlag_mutex.unlock();
+        av_packet_free(&pkt);
+        av_frame_free(&av_frame);
     }
     else
         printSocketStatus(status);
@@ -251,43 +329,46 @@ std::string UdpServer::clientRead(int sock_fd,char *buffer, sockaddr_in c_addres
     return rsp;
 }
 
-size_t UdpServer::build_packet(char *buffer, cv::Mat & frm , uint16_t packet_id, size_t last_packet_len, size_t packet_count)
+size_t UdpServer::build_packet(char *buffer,uint8_t * data, uint16_t data_size, size_t pts, size_t dts,size_t avpkt_size, size_t buffer_len)
 {
-    u_char * frm_ptr = frm.data;
+    if((size_t)(data_size + HDR_LEN) > buffer_len)
+    {
+        std::cout << "PACKET SIZE EXCEEDED NOTHING WAS BUILT" << std::endl;
+        return 0;
+    }
+
     size_t len;
-    size_t ofst;
     buffer[0] = 'F';
     buffer[1] = 'R';
     buffer[2] = 'M';
     buffer[3] = ':';
-    buffer[4] = (char)(packet_id >> 8);
-    buffer[5] = (char)packet_id;
-    len = 6;
+    buffer[4] = (char)(data_size >> 8);
+    buffer[5] = (char)data_size;
 
-    ofst = (packet_id - 1) * NETWORK_MTU;
+    buffer[6] = (char)(pts >> 24);
+    buffer[7] = (char)(pts >> 16);
+    buffer[8] = (char)(pts >> 8);
+    buffer[9] = (char)(pts);
 
-    if(packet_id == packet_count)
+    buffer[10] = (char)(dts >> 24);
+    buffer[11] = (char)(dts >> 16);
+    buffer[12] = (char)(dts >> 8);
+    buffer[13] = (char)(dts);
+
+    buffer[14] = (char)(avpkt_size >> 24);
+    buffer[15] = (char)(avpkt_size >> 16);
+    buffer[16] = (char)(avpkt_size >> 8);
+    buffer[17] = (char)(avpkt_size);
+    len = HDR_LEN;
+
+    memcpy(buffer + len, data, data_size);
+    len += data_size;
+
+    if(len < buffer_len)
     {
-        if((frm_ptr + ofst + last_packet_len) > frm.dataend)
-        {
-            std::cout << "DATA SIZE ERROR" << std::endl;
-            return 0;
-        }
-        memcpy(buffer + len,frm_ptr + ofst, last_packet_len);
-        len += last_packet_len;
+        memset(buffer + len,'*',buffer_len - len);
+        len = buffer_len;
     }
-    else
-    {
-        memcpy(buffer + len,frm_ptr + ofst, NETWORK_MTU);
-        len += NETWORK_MTU;
-    }
-
-    buffer[len] = 'E';
-    buffer[len + 1] = 'N';
-    buffer[len + 2] = 'D';
-    buffer[len + 3] = ';';
-    len += 4;
-
     return len;
 }
 
